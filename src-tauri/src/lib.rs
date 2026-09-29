@@ -63,6 +63,7 @@ fn calculate_matchup_probability(
         format!("{} PPG vs {} PA/G differential", team_a_abbr, team_b_abbr),
         "3rd-down & red-zone efficiency".into(),
         "Turnover margin".into(),
+        "Gridiron v0.1 heuristic (VS Code)".into(),
     ];
     if rush_edge_a.abs() > 15.0 {
         factors.push("Notable rushing mismatch".into());
