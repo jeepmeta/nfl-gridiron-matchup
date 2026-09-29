@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { filterTeams } from "../data/nflTeams";
+import { NFL_TEAMS, filterTeams } from "../data/nflTeams";
 import type { NFLTeam } from "../types/nfl";
 
 interface Props {
@@ -43,7 +43,7 @@ export function TeamSelector({ selectedA, selectedB, onSelectA, onSelectB, onLoc
 
       <div className="selector-columns">
         <div className="team-col">
-          <h3>Team A</h3>
+          <h3>Away</h3>
           <div className="team-grid">
             {teams.map((t) => (
               <button
@@ -68,7 +68,7 @@ export function TeamSelector({ selectedA, selectedB, onSelectA, onSelectB, onLoc
         <div className="vs-badge">VS</div>
 
         <div className="team-col">
-          <h3>Team B</h3>
+          <h3>Home</h3>
           <div className="team-grid">
             {teams.map((t) => (
               <button
@@ -92,7 +92,7 @@ export function TeamSelector({ selectedA, selectedB, onSelectA, onSelectB, onLoc
       </div>
 
       <button className="lock-btn" disabled={!canLock} onClick={onLock}>
-        {canLock ? "⚡ LOCK MATCHUP" : "Select two different teams"}
+        {canLock ? "LOCK MATCHUP" : "Select two different teams"}
       </button>
     </div>
   );
