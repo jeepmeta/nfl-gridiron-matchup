@@ -32,6 +32,8 @@ export interface TeamSeasonStats {
   turnoverDiff: number;
   rankOffense?: number;
   rankDefense?: number;
+  /** true when fetched from ESPN live endpoints */
+  live?: boolean;
 }
 
 export interface MomentumInput {
