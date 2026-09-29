@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::Manager;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamSeasonStats {
     pub wins: i32,
@@ -20,6 +21,8 @@ pub struct TeamSeasonStats {
     pub turnover_diff: i32,
     pub rank_offense: Option<i32>,
     pub rank_defense: Option<i32>,
+    #[serde(default)]
+    pub live: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,8 +35,232 @@ pub struct MatchupProbability {
     pub key_factors: Vec<String>,
 }
 
-/// Placeholder self-optimizing probability engine.
-/// Weights will be tuned over time from post-game outcomes.
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
+
+fn stat_map_from_categories(categories: &[Value]) -> std::collections::HashMap<String, f64> {
+    let mut map = std::collections::HashMap::new();
+    for cat in categories {
+        if let Some(stats) = cat.get("stats").and_then(|s| s.as_array()) {
+            for s in stats {
+                let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                if let Some(v) = s.get("value").and_then(|v| v.as_f64()) {
+                    map.insert(name.to_string(), v);
+                }
+                if let Some(v) = s.get("perGameValue").and_then(|v| v.as_f64()) {
+                    map.insert(format!("{name}__pg"), v);
+                }
+            }
+        }
+    }
+    map
+}
+
+fn get_f(map: &std::collections::HashMap<String, f64>, keys: &[&str]) -> Option<f64> {
+    for k in keys {
+        if let Some(v) = map.get(*k) {
+            return Some(*v);
+        }
+    }
+    None
+}
+
+async fn espn_team_id_for_abbr(client: &reqwest::Client, abbr: &str) -> Result<String, String> {
+    let abbr = abbr.to_uppercase();
+    let data: Value = client
+        .get("https://site.api.espn.com/apis/v2/sports/football/nfl/standings")
+        .header("User-Agent", "GridironMatchup/0.2")
+        .send()
+        .await
+        .map_err(|e| format!("standings request failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("standings parse failed: {e}"))?;
+
+    let empty: Vec<Value> = vec![];
+    for conf in data.get("children").and_then(|c| c.as_array()).unwrap_or(&empty) {
+        let entries = conf
+            .pointer("/standings/entries")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for entry in entries {
+            let team_abbr = entry
+                .pointer("/team/abbreviation")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            if team_abbr.eq_ignore_ascii_case(&abbr) {
+                if let Some(id) = entry.pointer("/team/id").and_then(|i| i.as_str()) {
+                    return Ok(id.to_string());
+                }
+            }
+        }
+    }
+    Err(format!("ESPN team id not found for {abbr}"))
+}
+
+fn standings_record_for_abbr(data: &Value, abbr: &str) -> (i32, i32, i32, f64, f64) {
+    let abbr_u = abbr.to_uppercase();
+    let empty: Vec<Value> = vec![];
+    for conf in data.get("children").and_then(|c| c.as_array()).unwrap_or(&empty) {
+        let entries = conf
+            .pointer("/standings/entries")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for entry in entries {
+            let team_abbr = entry
+                .pointer("/team/abbreviation")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            if !team_abbr.eq_ignore_ascii_case(&abbr_u) {
+                continue;
+            }
+            let mut wins = 0i32;
+            let mut losses = 0i32;
+            let mut ties = 0i32;
+            let mut pf = 0.0;
+            let mut pa = 0.0;
+            if let Some(stats) = entry.get("stats").and_then(|s| s.as_array()) {
+                for s in stats {
+                    let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let val = s.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    match name {
+                        "wins" => wins = val as i32,
+                        "losses" => losses = val as i32,
+                        "ties" => ties = val as i32,
+                        "pointsFor" => pf = val,
+                        "pointsAgainst" => pa = val,
+                        _ => {}
+                    }
+                }
+            }
+            return (wins, losses, ties, pf, pa);
+        }
+    }
+    (0, 0, 0, 0.0, 0.0)
+}
+
+#[tauri::command]
+async fn fetch_team_season_stats(team_abbr: String) -> Result<TeamSeasonStats, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let abbr = team_abbr.to_uppercase();
+    let team_id = espn_team_id_for_abbr(&client, &abbr).await?;
+
+    let standings: Value = client
+        .get("https://site.api.espn.com/apis/v2/sports/football/nfl/standings")
+        .header("User-Agent", "GridironMatchup/0.2")
+        .send()
+        .await
+        .map_err(|e| format!("standings: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("standings json: {e}"))?;
+
+    let (wins, losses, ties, points_for, points_against) =
+        standings_record_for_abbr(&standings, &abbr);
+    let games = (wins + losses + ties).max(1) as f64;
+    let ppg = points_for / games;
+    let papg = points_against / games;
+
+    let site_url = format!(
+        "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{team_id}/statistics"
+    );
+    let site: Value = client
+        .get(&site_url)
+        .header("User-Agent", "GridironMatchup/0.2")
+        .send()
+        .await
+        .map_err(|e| format!("team statistics: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("team statistics json: {e}"))?;
+
+    let empty: Vec<Value> = vec![];
+    let site_cats = site
+        .pointer("/results/stats/categories")
+        .and_then(|c| c.as_array())
+        .unwrap_or(&empty);
+    let site_map = stat_map_from_categories(site_cats);
+
+    let pass_final = get_f(&site_map, &["netPassingYardsPerGame", "netPassingYardsPerGame__pg"])
+        .or_else(|| get_f(&site_map, &["netPassingYards"]).map(|v| v / games))
+        .unwrap_or(0.0);
+
+    let rush_final = get_f(&site_map, &["rushingYardsPerGame", "rushingYardsPerGame__pg"])
+        .or_else(|| get_f(&site_map, &["rushingYards"]).map(|v| v / games))
+        .unwrap_or(0.0);
+
+    let third = get_f(&site_map, &["thirdDownConvPct"]).unwrap_or(0.0);
+    let fourth = get_f(&site_map, &["fourthDownConvPct"]).unwrap_or(0.0);
+    let redzone = get_f(
+        &site_map,
+        &["redzoneScoringPct", "redzoneEfficiencyPct", "redzoneTouchdownPct"],
+    )
+    .unwrap_or(0.0);
+    let to_diff = get_f(&site_map, &["turnOverDifferential"]).unwrap_or(0.0) as i32;
+    let ppg_final = get_f(&site_map, &["totalPointsPerGame"]).unwrap_or(ppg);
+
+    let mut yards_allowed_pg = 0.0;
+    let year = 2026;
+    let core_url = format!(
+        "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/{year}/types/2/teams/{team_id}/statistics"
+    );
+    if let Ok(resp) = client
+        .get(&core_url)
+        .header("User-Agent", "GridironMatchup/0.2")
+        .send()
+        .await
+    {
+        if let Ok(core) = resp.json::<Value>().await {
+            if let Some(cats) = core.pointer("/splits/categories").and_then(|c| c.as_array()) {
+                let core_map = stat_map_from_categories(cats);
+                if let Some(ya) = get_f(&core_map, &["yardsAllowed"]) {
+                    if ya > 0.0 {
+                        yards_allowed_pg = ya / games;
+                    }
+                }
+            }
+        }
+    }
+    if yards_allowed_pg <= 0.0 {
+        yards_allowed_pg = papg * 14.5;
+    }
+
+    let stats = TeamSeasonStats {
+        wins,
+        losses,
+        ties,
+        points_for,
+        points_against,
+        points_per_game: round1(ppg_final),
+        points_allowed_per_game: round1(papg),
+        passing_yards_per_game: round1(pass_final),
+        rushing_yards_per_game: round1(rush_final),
+        yards_allowed_per_game: round1(yards_allowed_pg),
+        third_down_pct: round1(third),
+        fourth_down_pct: round1(fourth),
+        red_zone_pct: round1(redzone),
+        turnover_diff: to_diff,
+        rank_offense: None,
+        rank_defense: None,
+        live: true,
+    };
+    eprintln!(
+        "[gridiron] live {} => {}-{} PPG={:.1} PA/G={:.1}",
+        abbr, wins, losses, stats.points_per_game, stats.points_allowed_per_game
+    );
+    Ok(stats)
+}
+
 #[tauri::command]
 fn calculate_matchup_probability(
     team_a_abbr: String,
@@ -63,8 +290,10 @@ fn calculate_matchup_probability(
         format!("{} PPG vs {} PA/G differential", team_a_abbr, team_b_abbr),
         "3rd-down & red-zone efficiency".into(),
         "Turnover margin".into(),
-        "Gridiron v0.1 heuristic (VS Code)".into(),
     ];
+    if stats_a.live || stats_b.live {
+        factors.push("ESPN live season stats".into());
+    }
     if rush_edge_a.abs() > 15.0 {
         factors.push("Notable rushing mismatch".into());
     }
@@ -73,9 +302,9 @@ fn calculate_matchup_probability(
     }
 
     MatchupProbability {
-        team_a_win_pct: (a_win * 10.0).round() / 10.0,
-        team_b_win_pct: ((100.0 - a_win) * 10.0).round() / 10.0,
-        expected_margin: (margin * 10.0).round() / 10.0,
+        team_a_win_pct: round1(a_win),
+        team_b_win_pct: round1(100.0 - a_win),
+        expected_margin: round1(margin),
         confidence: 0.58 + (composite.abs() / 80.0).min(0.25),
         key_factors: factors,
     }
@@ -83,7 +312,7 @@ fn calculate_matchup_probability(
 
 #[tauri::command]
 fn greet(name: &str) -> String {
-    format!("Hello, {}! Welcome to Gridiron Matchup.", name)
+    format!("Hello, {name}! Welcome to Gridiron Matchup.")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,7 +321,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
-            calculate_matchup_probability
+            calculate_matchup_probability,
+            fetch_team_season_stats
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
