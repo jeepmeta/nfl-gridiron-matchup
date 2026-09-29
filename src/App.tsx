@@ -2,20 +2,17 @@ import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TeamSelector } from "./components/TeamSelector";
 import { MatchupDashboard } from "./components/MatchupDashboard";
-import { mockSeasonStats } from "./services/espn";
 import type { NFLTeam, MatchupProbability, TeamSeasonStats } from "./types/nfl";
 import "./App.css";
 
 async function loadTeamStats(team: NFLTeam): Promise<TeamSeasonStats> {
-  try {
-    const live = await invoke<TeamSeasonStats>("fetch_team_season_stats", {
-      teamAbbr: team.abbr,
-    });
-    return live;
-  } catch (err) {
-    console.warn(`ESPN live stats failed for ${team.abbr}, using mock:`, err);
-    return { ...mockSeasonStats(parseInt(team.id, 10) || 1), live: false };
+  const live = await invoke<TeamSeasonStats>("fetch_team_season_stats", {
+    teamAbbr: team.abbr,
+  });
+  if (!live || typeof live.wins !== "number") {
+    throw new Error(`Invalid stats payload for ${team.abbr}`);
   }
+  return { ...live, live: live.live !== false };
 }
 
 function App() {
@@ -27,10 +24,12 @@ function App() {
   const [probability, setProbability] = useState<MatchupProbability | null>(null);
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleLock = useCallback(async () => {
     if (!teamA || !teamB) return;
     setLoading(true);
+    setErrorMsg(null);
     setStatusMsg("Fetching live ESPN stats…");
     try {
       const [sA, sB] = await Promise.all([
@@ -48,7 +47,7 @@ function App() {
           statsA: sA,
           statsB: sB,
         });
-      } catch {
+      } catch (e) {
         const edge =
           sA.pointsPerGame -
           sB.pointsAllowedPerGame -
@@ -61,7 +60,8 @@ function App() {
           confidence: 0.62,
           keyFactors: [
             "Offensive efficiency differential",
-            sA.live || sB.live ? "ESPN live season stats" : "Fallback mock stats",
+            "ESPN live season stats",
+            `Model fallback (${String(e)})`,
           ],
         };
       }
@@ -72,8 +72,13 @@ function App() {
       setLocked(true);
       setStatusMsg(null);
     } catch (e) {
-      console.error(e);
-      setStatusMsg("Failed to load matchup. Check the terminal for errors.");
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Live stats error:", e);
+      setErrorMsg(
+        `Live ESPN fetch failed: ${msg}. ` +
+          "Ensure src-tauri/src/lib.rs includes fetch_team_season_stats and Cargo.toml has reqwest."
+      );
+      setStatusMsg(null);
     } finally {
       setLoading(false);
     }
@@ -85,6 +90,7 @@ function App() {
     setStatsB(null);
     setProbability(null);
     setStatusMsg(null);
+    setErrorMsg(null);
   };
 
   return (
@@ -99,7 +105,7 @@ function App() {
         <main className="home-main">
           <p className="tagline">
             Select any two NFL teams for a dense side-by-side matchup powered by
-            self-optimizing models and live ESPN stats.
+            live ESPN stats and the matchup model.
           </p>
           <TeamSelector
             selectedA={teamA}
@@ -109,7 +115,27 @@ function App() {
             onLock={handleLock}
           />
           {(loading || statusMsg) && (
-            <div className="loading-pulse">{statusMsg ?? "Computing matchup…"}</div>
+            <div className="loading-pulse">{statusMsg ?? "Working…"}</div>
+          )}
+          {errorMsg && (
+            <div
+              className="error-banner"
+              style={{
+                marginTop: "1rem",
+                padding: "0.75rem 1rem",
+                maxWidth: 640,
+                marginLeft: "auto",
+                marginRight: "auto",
+                background: "rgba(180,40,40,0.25)",
+                border: "1px solid #c44",
+                borderRadius: 8,
+                color: "#f8c0c0",
+                fontSize: "0.85rem",
+                lineHeight: 1.4,
+              }}
+            >
+              {errorMsg}
+            </div>
           )}
         </main>
       )}
