@@ -6,6 +6,18 @@ import { mockSeasonStats } from "./services/espn";
 import type { NFLTeam, MatchupProbability, TeamSeasonStats } from "./types/nfl";
 import "./App.css";
 
+async function loadTeamStats(team: NFLTeam): Promise<TeamSeasonStats> {
+  try {
+    const live = await invoke<TeamSeasonStats>("fetch_team_season_stats", {
+      teamAbbr: team.abbr,
+    });
+    return live;
+  } catch (err) {
+    console.warn(`ESPN live stats failed for ${team.abbr}, using mock:`, err);
+    return { ...mockSeasonStats(parseInt(team.id, 10) || 1), live: false };
+  }
+}
+
 function App() {
   const [teamA, setTeamA] = useState<NFLTeam | null>(null);
   const [teamB, setTeamB] = useState<NFLTeam | null>(null);
@@ -14,13 +26,19 @@ function App() {
   const [statsB, setStatsB] = useState<TeamSeasonStats | null>(null);
   const [probability, setProbability] = useState<MatchupProbability | null>(null);
   const [loading, setLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const handleLock = useCallback(async () => {
     if (!teamA || !teamB) return;
     setLoading(true);
+    setStatusMsg("Fetching live ESPN stats…");
     try {
-      const sA = mockSeasonStats(parseInt(teamA.id, 10));
-      const sB = mockSeasonStats(parseInt(teamB.id, 10) + 17);
+      const [sA, sB] = await Promise.all([
+        loadTeamStats(teamA),
+        loadTeamStats(teamB),
+      ]);
+
+      setStatusMsg("Computing matchup model…");
 
       let prob: MatchupProbability;
       try {
@@ -43,8 +61,7 @@ function App() {
           confidence: 0.62,
           keyFactors: [
             "Offensive efficiency differential",
-            "Recent form (mock)",
-            "Injury impact (placeholder)",
+            sA.live || sB.live ? "ESPN live season stats" : "Fallback mock stats",
           ],
         };
       }
@@ -53,6 +70,10 @@ function App() {
       setStatsB(sB);
       setProbability(prob);
       setLocked(true);
+      setStatusMsg(null);
+    } catch (e) {
+      console.error(e);
+      setStatusMsg("Failed to load matchup. Check the terminal for errors.");
     } finally {
       setLoading(false);
     }
@@ -63,6 +84,7 @@ function App() {
     setStatsA(null);
     setStatsB(null);
     setProbability(null);
+    setStatusMsg(null);
   };
 
   return (
@@ -77,7 +99,7 @@ function App() {
         <main className="home-main">
           <p className="tagline">
             Select any two NFL teams for a dense side-by-side matchup powered by
-            self-optimizing models and live stats.
+            self-optimizing models and live ESPN stats.
           </p>
           <TeamSelector
             selectedA={teamA}
@@ -86,7 +108,9 @@ function App() {
             onSelectB={setTeamB}
             onLock={handleLock}
           />
-          {loading && <div className="loading-pulse">Computing matchup…</div>}
+          {(loading || statusMsg) && (
+            <div className="loading-pulse">{statusMsg ?? "Computing matchup…"}</div>
+          )}
         </main>
       )}
 
@@ -102,7 +126,8 @@ function App() {
       )}
 
       <footer className="app-footer">
-        Probabilities are statistical model outputs only · Never betting advice · v0.1
+        Probabilities are statistical model outputs only · Never betting advice · v0.2
+        {statsA?.live || statsB?.live ? " · Live ESPN data" : ""}
       </footer>
     </div>
   );
