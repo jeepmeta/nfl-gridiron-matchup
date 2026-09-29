@@ -1,12 +1,21 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TeamSelector } from "./components/TeamSelector";
 import { MatchupDashboard } from "./components/MatchupDashboard";
 import type { NFLTeam, MatchupProbability, TeamSeasonStats } from "./types/nfl";
 import "./App.css";
 
+interface PipelineStatus {
+  teamsCached: number;
+  lastFullRefresh: string | null;
+  cacheDir: string;
+  stale: boolean;
+  minRequestIntervalMs: number;
+  fullRefreshTtlSecs: number;
+}
+
 async function loadTeamStats(team: NFLTeam): Promise<TeamSeasonStats> {
-  const live = await invoke<TeamSeasonStats>("fetch_team_season_stats", {
+  const live = await invoke<TeamSeasonStats>("get_team_stats", {
     teamAbbr: team.abbr,
   });
   if (!live || typeof live.wins !== "number") {
@@ -25,12 +34,42 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pipe, setPipe] = useState<PipelineStatus | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await invoke<PipelineStatus>("pipeline_status");
+      setPipe(s);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  const handleRefreshPipeline = async () => {
+    setLoading(true);
+    setErrorMsg(null);
+    setStatusMsg("Syncing full league pipeline (rate-limited)…");
+    try {
+      const s = await invoke<PipelineStatus>("refresh_pipeline", { force: true });
+      setPipe(s);
+      setStatusMsg(`Pipeline ready · ${s.teamsCached} teams cached`);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+      setStatusMsg(null);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleLock = useCallback(async () => {
     if (!teamA || !teamB) return;
     setLoading(true);
     setErrorMsg(null);
-    setStatusMsg("Fetching live ESPN stats…");
+    setStatusMsg("Loading normalized team stats (cache-first)…");
     try {
       const [sA, sB] = await Promise.all([
         loadTeamStats(teamA),
@@ -60,8 +99,7 @@ function App() {
           confidence: 0.62,
           keyFactors: [
             "Offensive efficiency differential",
-            "ESPN live season stats",
-            `Model fallback (${String(e)})`,
+            "Normalized local pipeline",
           ],
         };
       }
@@ -71,18 +109,15 @@ function App() {
       setProbability(prob);
       setLocked(true);
       setStatusMsg(null);
+      refreshStatus();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("Live stats error:", e);
-      setErrorMsg(
-        `Live ESPN fetch failed: ${msg}. ` +
-          "Ensure src-tauri/src/lib.rs includes fetch_team_season_stats and Cargo.toml has reqwest."
-      );
+      setErrorMsg(`Stats load failed: ${msg}`);
       setStatusMsg(null);
     } finally {
       setLoading(false);
     }
-  }, [teamA, teamB]);
+  }, [teamA, teamB, refreshStatus]);
 
   const handleReset = () => {
     setLocked(false);
@@ -98,15 +133,49 @@ function App() {
       <div className="field-overlay" />
       <header className="app-header">
         <div className="logo-mark">GRIDIRON</div>
-        <div className="logo-sub">MATCHUP · AI COMPARISON ENGINE</div>
+        <div className="logo-sub">MATCHUP · NORMALIZED PIPELINE</div>
       </header>
 
       {!locked && (
         <main className="home-main">
           <p className="tagline">
-            Select any two NFL teams for a dense side-by-side matchup powered by
-            live ESPN stats and the matchup model.
+            Side-by-side NFL matchups from a local normalized stats pipeline.
+            ESPN is rate-limited; the app reads from cache first.
           </p>
+
+          {pipe && (
+            <div
+              style={{
+                maxWidth: 640,
+                margin: "0 auto 1rem",
+                fontSize: "0.8rem",
+                opacity: 0.85,
+                textAlign: "center",
+              }}
+            >
+              Pipeline: {pipe.teamsCached}/32 teams ·{" "}
+              {pipe.stale ? "stale — refresh recommended" : "fresh"} · min gap{" "}
+              {pipe.minRequestIntervalMs}ms
+              <div style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  onClick={handleRefreshPipeline}
+                  disabled={loading}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 6,
+                    border: "1px solid #c9a227",
+                    background: "transparent",
+                    color: "#e8d48b",
+                    cursor: "pointer",
+                  }}
+                >
+                  Sync full league (rate-limited)
+                </button>
+              </div>
+            </div>
+          )}
+
           <TeamSelector
             selectedA={teamA}
             selectedB={teamB}
@@ -119,7 +188,6 @@ function App() {
           )}
           {errorMsg && (
             <div
-              className="error-banner"
               style={{
                 marginTop: "1rem",
                 padding: "0.75rem 1rem",
@@ -131,7 +199,6 @@ function App() {
                 borderRadius: 8,
                 color: "#f8c0c0",
                 fontSize: "0.85rem",
-                lineHeight: 1.4,
               }}
             >
               {errorMsg}
@@ -152,8 +219,8 @@ function App() {
       )}
 
       <footer className="app-footer">
-        Probabilities are statistical model outputs only · Never betting advice · v0.2
-        {statsA?.live || statsB?.live ? " · Live ESPN data" : ""}
+        Model outputs only · Never betting advice · v0.3 pipeline
+        {statsA?.live || statsB?.live ? " · Normalized cache" : ""}
       </footer>
     </div>
   );
