@@ -4,6 +4,7 @@ import { TeamSelector } from "./components/TeamSelector";
 import { MatchupDashboard } from "./components/MatchupDashboard";
 import type { NFLTeam, MatchupProbability, TeamSeasonStats } from "./types/nfl";
 import "./App.css";
+import "./holo.css";
 
 interface PipelineStatus {
   teamsCached: number;
@@ -138,6 +139,7 @@ function App() {
 
       {!locked && (
         <main className="home-main">
+          <div className="field-stage" aria-hidden="true" />
           <p className="tagline">
             Side-by-side NFL matchups from a local normalized stats pipeline.
             ESPN is rate-limited; the app reads from cache first.
