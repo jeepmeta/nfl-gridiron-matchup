@@ -69,17 +69,40 @@ fn get_f(map: &std::collections::HashMap<String, f64>, keys: &[&str]) -> Option<
     None
 }
 
-async fn espn_team_id_for_abbr(client: &reqwest::Client, abbr: &str) -> Result<String, String> {
-    let abbr = abbr.to_uppercase();
-    let data: Value = client
-        .get("https://site.api.espn.com/apis/v2/sports/football/nfl/standings")
-        .header("User-Agent", "GridironMatchup/0.2")
+async fn get_json(client: &reqwest::Client, url: &str) -> Result<Value, String> {
+    let resp = client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; GridironMatchup/0.2)")
+        .header("Accept", "application/json")
+        .header("Accept-Encoding", "gzip, deflate")
         .send()
         .await
-        .map_err(|e| format!("standings request failed: {e}"))?
-        .json()
+        .map_err(|e| format!("request failed ({url}): {e}"))?;
+
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
         .await
-        .map_err(|e| format!("standings parse failed: {e}"))?;
+        .map_err(|e| format!("read body failed ({url}): {e}"))?;
+
+    if !status.is_success() {
+        let preview = String::from_utf8_lossy(&bytes).chars().take(200).collect::<String>();
+        return Err(format!("HTTP {status} from {url}: {preview}"));
+    }
+
+    serde_json::from_slice(&bytes).map_err(|e| {
+        let preview = String::from_utf8_lossy(&bytes).chars().take(120).collect::<String>();
+        format!("json decode failed ({url}): {e}; body starts: {preview}")
+    })
+}
+
+async fn espn_team_id_for_abbr(client: &reqwest::Client, abbr: &str) -> Result<String, String> {
+    let abbr = abbr.to_uppercase();
+    let data = get_json(
+        client,
+        "https://site.api.espn.com/apis/v2/sports/football/nfl/standings",
+    )
+    .await?;
 
     let empty: Vec<Value> = vec![];
     for conf in data.get("children").and_then(|c| c.as_array()).unwrap_or(&empty) {
@@ -155,15 +178,11 @@ async fn fetch_team_season_stats(team_abbr: String) -> Result<TeamSeasonStats, S
     let abbr = team_abbr.to_uppercase();
     let team_id = espn_team_id_for_abbr(&client, &abbr).await?;
 
-    let standings: Value = client
-        .get("https://site.api.espn.com/apis/v2/sports/football/nfl/standings")
-        .header("User-Agent", "GridironMatchup/0.2")
-        .send()
-        .await
-        .map_err(|e| format!("standings: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("standings json: {e}"))?;
+    let standings = get_json(
+        client,
+        "https://site.api.espn.com/apis/v2/sports/football/nfl/standings",
+    )
+    .await?;
 
     let (wins, losses, ties, points_for, points_against) =
         standings_record_for_abbr(&standings, &abbr);
@@ -174,15 +193,7 @@ async fn fetch_team_season_stats(team_abbr: String) -> Result<TeamSeasonStats, S
     let site_url = format!(
         "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{team_id}/statistics"
     );
-    let site: Value = client
-        .get(&site_url)
-        .header("User-Agent", "GridironMatchup/0.2")
-        .send()
-        .await
-        .map_err(|e| format!("team statistics: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("team statistics json: {e}"))?;
+    let site = get_json(client, &site_url).await?;
 
     let empty: Vec<Value> = vec![];
     let site_cats = site
@@ -214,19 +225,12 @@ async fn fetch_team_season_stats(team_abbr: String) -> Result<TeamSeasonStats, S
     let core_url = format!(
         "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/{year}/types/2/teams/{team_id}/statistics"
     );
-    if let Ok(resp) = client
-        .get(&core_url)
-        .header("User-Agent", "GridironMatchup/0.2")
-        .send()
-        .await
-    {
-        if let Ok(core) = resp.json::<Value>().await {
-            if let Some(cats) = core.pointer("/splits/categories").and_then(|c| c.as_array()) {
-                let core_map = stat_map_from_categories(cats);
-                if let Some(ya) = get_f(&core_map, &["yardsAllowed"]) {
-                    if ya > 0.0 {
-                        yards_allowed_pg = ya / games;
-                    }
+    if let Ok(core) = get_json(client, &core_url).await {
+        if let Some(cats) = core.pointer("/splits/categories").and_then(|c| c.as_array()) {
+            let core_map = stat_map_from_categories(cats);
+            if let Some(ya) = get_f(&core_map, &["yardsAllowed"]) {
+                if ya > 0.0 {
+                    yards_allowed_pg = ya / games;
                 }
             }
         }
