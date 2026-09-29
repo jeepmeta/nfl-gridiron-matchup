@@ -1,6 +1,7 @@
 /**
- * Keyless ESPN Site API helpers.
- * Unofficial endpoints — rate-limit politely and expect possible shape changes.
+ * Keyless ESPN helpers (frontend).
+ * Live team season stats are fetched from Rust (`fetch_team_season_stats`)
+ * to avoid CORS. These helpers remain for scoreboard/roster experiments.
  */
 
 const SITE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl";
@@ -38,15 +39,19 @@ export async function fetchScoreboard(dates?: string) {
 }
 
 export async function fetchStandings() {
-  const res = await fetch("https://site.api.espn.com/apis/v2/sports/football/nfl/standings");
+  const res = await fetch(
+    "https://site.api.espn.com/apis/v2/sports/football/nfl/standings"
+  );
   if (!res.ok) throw new Error(`ESPN standings failed: ${res.status}`);
   return res.json();
 }
 
-/** Placeholder mock stats until live ingestion is wired */
+/** Offline fallback if Rust ESPN fetch fails */
 export function mockSeasonStats(seed: number) {
   const r = (min: number, max: number) =>
-    Math.round((min + ((seed * 9301 + 49297) % 233280) / 233280 * (max - min)) * 10) / 10;
+    Math.round(
+      (min + (((seed * 9301 + 49297) % 233280) / 233280) * (max - min)) * 10
+    ) / 10;
   return {
     wins: Math.floor(r(3, 12)),
     losses: Math.floor(r(3, 12)),
@@ -64,5 +69,6 @@ export function mockSeasonStats(seed: number) {
     turnoverDiff: Math.floor(r(-8, 12)),
     rankOffense: Math.floor(r(1, 32)),
     rankDefense: Math.floor(r(1, 32)),
+    live: false as boolean,
   };
 }
